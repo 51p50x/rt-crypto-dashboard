@@ -12,3 +12,11 @@ export interface HourAccumulator {
   sum: number;
   count: number;
 }
+
+export interface HourlyAveragePersistencePayload {
+  symbol: SupportedPair;
+  hourBucket: string;
+  average: number;
+  samples: number;
+  lastTickTimestamp: number;
+}

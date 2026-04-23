@@ -20,6 +20,7 @@ export class RatesGateway
   implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit, OnModuleDestroy
 {
   private readonly context = RatesGateway.name;
+  private readonly logBroadcastDebug = process.env.RATES_LOG_BROADCAST_DEBUG === 'true';
   private updatesSubscription: Subscription | null = null;
   private upstreamStatusSubscription: Subscription | null = null;
 
@@ -35,7 +36,9 @@ export class RatesGateway
   onModuleInit(): void {
     this.updatesSubscription = this.ratesService.rateUpdates$.subscribe((snapshot) => {
       this.server.emit('rate.update', snapshot);
-      this.logger.debug(this.context, 'Broadcasted rate update.', snapshot);
+      if (this.logBroadcastDebug) {
+        this.logger.debug(this.context, 'Broadcasted rate update.', snapshot);
+      }
     });
 
     this.upstreamStatusSubscription = this.finnhubService.upstreamStatus$.subscribe((statusEvent) => {

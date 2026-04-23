@@ -88,6 +88,24 @@ export function resolveMockIntervalMs(rawValue: string | undefined): number {
   return parsed;
 }
 
+export function isEnvFlagEnabled(rawValue: string | undefined): boolean {
+  if (!rawValue) {
+    return false;
+  }
+
+  const normalized = rawValue.trim().toLowerCase();
+  return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on';
+}
+
+export function resolveMaxReconnectAttempts(rawValue: string | undefined): number | null {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+
+  return Math.floor(parsed);
+}
+
 export function getSupportedPairs(): readonly SupportedPair[] {
   return SUPPORTED_PAIRS;
 }

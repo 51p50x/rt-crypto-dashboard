@@ -2,25 +2,43 @@ import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Observable, Subject, Subscription } from 'rxjs';
 import { AppLoggerService } from '../common/logger/app-logger.service';
 import { FinnhubService } from '../finnhub/finnhub.service';
-import { FinnhubTradeTick, SUPPORTED_PAIRS, SupportedPair } from '../finnhub/finnhub.types';
+import { FinnhubTradeTick, SUPPORTED_PAIRS } from '../finnhub/finnhub.types';
+import { HourlyAveragePersistenceScheduler } from './hourly-average-persistence-scheduler';
+import { RateUpdateEmitter } from './rate-update-emitter';
 import { applyTickToAccumulator, toSnapshot } from './rates.helpers';
+import { RatesRuntimeConfigService } from './rates-runtime-config.service';
 import { HourlyAverageRepository } from './repositories/hourly-average.repository';
-import { HourAccumulator, RateSnapshot } from './rates.types';
+import { HourAccumulator, HourlyAveragePersistencePayload, RateSnapshot } from './rates.types';
 
 @Injectable()
 export class RatesService implements OnModuleInit, OnModuleDestroy {
   private readonly context = RatesService.name;
   private readonly rateUpdateSubject = new Subject<RateSnapshot>();
-  private readonly latestByPair = new Map<SupportedPair, RateSnapshot>();
-  private readonly accumulatorByPair = new Map<SupportedPair, HourAccumulator>();
-  private readonly latestPersistedAverageByPair = new Map<SupportedPair, number>();
+  private readonly latestByPair = new Map<HourlyAveragePersistencePayload['symbol'], RateSnapshot>();
+  private readonly accumulatorByPair = new Map<HourlyAveragePersistencePayload['symbol'], HourAccumulator>();
+  private readonly latestPersistedAverageByPair = new Map<HourlyAveragePersistencePayload['symbol'], number>();
+  private readonly rateUpdateEmitter: RateUpdateEmitter;
+  private readonly persistenceScheduler: HourlyAveragePersistenceScheduler;
+  private readonly logTickDebug: boolean;
   private tickSubscription: Subscription | null = null;
 
   constructor(
     private readonly finnhubService: FinnhubService,
     private readonly hourlyAverageRepository: HourlyAverageRepository,
+    private readonly ratesRuntimeConfig: RatesRuntimeConfigService,
     private readonly logger: AppLoggerService
-  ) {}
+  ) {
+    this.logTickDebug = this.ratesRuntimeConfig.isTickDebugEnabled();
+    this.rateUpdateEmitter = new RateUpdateEmitter(
+      this.ratesRuntimeConfig.getEmitIntervalMs(),
+      (snapshot) => this.rateUpdateSubject.next(snapshot)
+    );
+    this.persistenceScheduler = new HourlyAveragePersistenceScheduler(
+      this.ratesRuntimeConfig.getPersistIntervalMs(),
+      async (payload) => this.persistAveragePayload(payload),
+      (payload, error) => this.handlePersistenceError(payload, error)
+    );
+  }
 
   get rateUpdates$(): Observable<RateSnapshot> {
     return this.rateUpdateSubject.asObservable();
@@ -39,6 +57,9 @@ export class RatesService implements OnModuleInit, OnModuleDestroy {
   onModuleDestroy(): void {
     this.tickSubscription?.unsubscribe();
     this.tickSubscription = null;
+    this.rateUpdateEmitter.dispose();
+    this.persistenceScheduler.dispose();
+    this.rateUpdateSubject.complete();
   }
 
   getLatest(): RateSnapshot[] {
@@ -51,33 +72,10 @@ export class RatesService implements OnModuleInit, OnModuleDestroy {
       return {
         symbol: pair,
         price: 0,
-        timestamp: Date.now(),
+        timestamp: 0,
         hourlyAverage: this.latestPersistedAverageByPair.get(pair) ?? null
       };
     });
-  }
-
-  async upsertHourlyAverage(symbol: SupportedPair, value: number): Promise<void> {
-    const accumulator = this.accumulatorByPair.get(symbol);
-    if (!accumulator) {
-      return;
-    }
-
-    try {
-      await this.hourlyAverageRepository.upsertAverage({
-        symbol,
-        hourBucket: accumulator.hourBucket,
-        average: value,
-        samples: accumulator.count,
-        lastTickTimestamp: this.latestByPair.get(symbol)?.timestamp ?? Date.now()
-      });
-      this.latestPersistedAverageByPair.set(symbol, value);
-    } catch (error) {
-      this.logger.error(this.context, 'Failed to upsert hourly average.', error, {
-        symbol,
-        value
-      });
-    }
   }
 
   private async loadPersistedAverages(): Promise<void> {
@@ -96,7 +94,7 @@ export class RatesService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async handleTick(tick: FinnhubTradeTick): Promise<void> {
+  private handleTick(tick: FinnhubTradeTick): void {
     const updatedAccumulator = applyTickToAccumulator(
       this.accumulatorByPair.get(tick.symbol),
       tick
@@ -107,15 +105,32 @@ export class RatesService implements OnModuleInit, OnModuleDestroy {
     const snapshot: RateSnapshot = toSnapshot(tick, hourlyAverage);
 
     this.latestByPair.set(tick.symbol, snapshot);
-    this.rateUpdateSubject.next(snapshot);
+    this.rateUpdateEmitter.schedule(snapshot);
 
-    this.logger.debug(this.context, 'Processed incoming tick.', {
+    if (this.logTickDebug) {
+      this.logger.debug(this.context, 'Processed incoming tick.', {
+        symbol: tick.symbol,
+        price: tick.price,
+        timestamp: tick.timestamp,
+        hourlyAverage
+      });
+    }
+
+    this.persistenceScheduler.schedule({
       symbol: tick.symbol,
-      price: tick.price,
-      timestamp: tick.timestamp,
-      hourlyAverage
+      hourBucket: updatedAccumulator.hourBucket,
+      average: hourlyAverage,
+      samples: updatedAccumulator.count,
+      lastTickTimestamp: tick.timestamp
     });
+  }
 
-    await this.upsertHourlyAverage(tick.symbol, hourlyAverage);
+  private async persistAveragePayload(payload: HourlyAveragePersistencePayload): Promise<void> {
+    await this.hourlyAverageRepository.upsertAverage(payload);
+    this.latestPersistedAverageByPair.set(payload.symbol, payload.average);
+  }
+
+  private handlePersistenceError(payload: HourlyAveragePersistencePayload, error: unknown): void {
+    this.logger.error(this.context, 'Failed to upsert hourly average.', error, payload);
   }
 }

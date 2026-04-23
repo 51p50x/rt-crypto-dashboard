@@ -2,6 +2,7 @@ import { Subject } from 'rxjs';
 import { FinnhubService } from '../finnhub/finnhub.service';
 import { FinnhubTradeTick } from '../finnhub/finnhub.types';
 import { AppLoggerService } from '../common/logger/app-logger.service';
+import { RatesRuntimeConfigService } from './rates-runtime-config.service';
 import { HourlyAverageRepository } from './repositories/hourly-average.repository';
 import { RatesService } from './rates.service';
 
@@ -25,21 +26,34 @@ describe('RatesService', () => {
     error: jest.fn()
   } as unknown as AppLoggerService;
 
+  const ratesRuntimeConfigMock = {
+    getEmitIntervalMs: jest.fn(() => 250),
+    getPersistIntervalMs: jest.fn(() => 1000),
+    isTickDebugEnabled: jest.fn(() => false)
+  } as unknown as RatesRuntimeConfigService;
+
   let service: RatesService;
 
   beforeEach(async () => {
+    jest.useFakeTimers();
     jest.clearAllMocks();
     hourlyAverageRepositoryMock.getLatestAveragesBySymbol = jest
       .fn()
       .mockResolvedValue({ ETHUSDC: 2900 });
     hourlyAverageRepositoryMock.upsertAverage = jest.fn().mockResolvedValue(undefined);
 
-    service = new RatesService(finnhubServiceMock, hourlyAverageRepositoryMock, loggerMock);
+    service = new RatesService(
+      finnhubServiceMock,
+      hourlyAverageRepositoryMock,
+      ratesRuntimeConfigMock,
+      loggerMock
+    );
     await service.onModuleInit();
   });
 
   afterEach(() => {
     service.onModuleDestroy();
+    jest.useRealTimers();
   });
 
   it('loads persisted averages for initial snapshot', () => {
@@ -56,6 +70,7 @@ describe('RatesService', () => {
       timestamp: Date.parse('2026-04-21T10:20:00.000Z')
     });
 
+    jest.advanceTimersByTime(1000);
     await flushPromises();
 
     const latest = service.getLatest().find((item) => item.symbol === 'ETHUSDC');
@@ -73,5 +88,5 @@ describe('RatesService', () => {
 });
 
 function flushPromises(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
+  return Promise.resolve();
 }

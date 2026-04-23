@@ -15,6 +15,8 @@ NestJS backend for real-time crypto rates.
 - Services contain business logic and log normal flow at `debug`.
 - Persistence is isolated in repository classes (no DB access from controllers).
 - Errors are logged at `error`.
+- SQLite runtime files are ignored from git (`*.sqlite`, `*.sqlite-shm`, `*.sqlite-wal`).
+- `ws` is imported with `import WebSocket = require('ws')` for stable CJS runtime compatibility.
 
 ## Endpoints
 
@@ -34,8 +36,13 @@ Copy `.env.example` to `.env` and set:
 - `PORT`
 - `FINNHUB_API_KEY`
 - `DATABASE_PATH`
-- `MOCK_STREAM_ENABLED` (`true` to run local fake ticks)
+- `MOCK_STREAM_ENABLED` (`true/1/yes/on` to run local fake ticks)
 - `MOCK_TICK_INTERVAL_MS` (used only in mock mode)
+- `FINNHUB_MAX_RECONNECT_ATTEMPTS` (`-1` means infinite retries, otherwise non-negative cap)
+- `RATES_EMIT_INTERVAL_MS` (WS emit throttle per symbol, default `250`)
+- `RATES_PERSIST_INTERVAL_MS` (DB upsert throttle per symbol, default `1000`)
+- `RATES_LOG_TICK_DEBUG` (`true` enables per-tick service debug logs)
+- `RATES_LOG_BROADCAST_DEBUG` (`true` enables per-update gateway debug logs)
 
 ## Scripts
 

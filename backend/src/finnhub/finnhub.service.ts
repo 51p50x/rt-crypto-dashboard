@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import WebSocket from 'ws';
+import { WebSocket } from 'ws';
 import { BehaviorSubject, Observable, Subject } from 'rxjs';
 import { AppLoggerService } from '../common/logger/app-logger.service';
 import {
@@ -8,7 +8,9 @@ import {
   buildPairByFinnhubSymbolMap,
   generateMockTick,
   getSupportedPairs,
+  isEnvFlagEnabled,
   parseTradeTicks,
+  resolveMaxReconnectAttempts,
   resolveMockIntervalMs
 } from './finnhub.helpers';
 import { getBackoffDelayMs } from './reconnect.strategy';
@@ -34,11 +36,16 @@ export class FinnhubService implements OnModuleInit, OnModuleDestroy {
   private reconnectAttempts = 0;
   private isShuttingDown = false;
   private readonly mockPriceByPair = buildInitialMockPriceByPair();
+  private readonly maxReconnectAttempts: number | null;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly logger: AppLoggerService
-  ) {}
+  ) {
+    this.maxReconnectAttempts = resolveMaxReconnectAttempts(
+      this.configService.get<string>('FINNHUB_MAX_RECONNECT_ATTEMPTS')
+    );
+  }
 
   get ticks$(): Observable<FinnhubTradeTick> {
     return this.tickSubject.asObservable();
@@ -58,12 +65,14 @@ export class FinnhubService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy(): void {
     this.stop();
+    this.tickSubject.complete();
+    this.upstreamStatusSubject.complete();
   }
 
   start(): void {
     this.isShuttingDown = false;
 
-    if (this.configService.get<string>('MOCK_STREAM_ENABLED') === 'true') {
+    if (isEnvFlagEnabled(this.configService.get<string>('MOCK_STREAM_ENABLED'))) {
       this.startMockStream();
       return;
     }
@@ -77,6 +86,7 @@ export class FinnhubService implements OnModuleInit, OnModuleDestroy {
 
     this.clearReconnectTimer();
     this.clearMockTimer();
+    this.cleanupSocket();
     this.emitUpstreamStatus('connecting');
 
     const wsUrl = `wss://ws.finnhub.io?token=${apiKey}`;
@@ -84,9 +94,10 @@ export class FinnhubService implements OnModuleInit, OnModuleDestroy {
 
     this.socket.on('open', () => this.onOpen());
     this.socket.on('message', (rawMessage) => this.onMessage(rawMessage.toString()));
-    this.socket.on('error', (error) =>
-      this.logger.error(this.context, 'Finnhub WebSocket error.', error)
-    );
+    this.socket.on('error', (error) => {
+      // Reconnect flow is handled in the close event emitted by ws.
+      this.logger.error(this.context, 'Finnhub WebSocket error.', error);
+    });
     this.socket.on('close', (code, reasonBuffer) => {
       const reason = reasonBuffer?.toString() ?? '';
       this.onClose(code, reason);
@@ -97,12 +108,7 @@ export class FinnhubService implements OnModuleInit, OnModuleDestroy {
     this.isShuttingDown = true;
     this.clearReconnectTimer();
     this.clearMockTimer();
-
-    if (this.socket) {
-      this.socket.removeAllListeners();
-      this.socket.close();
-      this.socket = null;
-    }
+    this.cleanupSocket();
 
     this.logger.debug(this.context, 'Finnhub connection stopped.');
     this.emitUpstreamStatus('disconnected', 'stopped');
@@ -136,6 +142,20 @@ export class FinnhubService implements OnModuleInit, OnModuleDestroy {
   }
 
   private scheduleReconnect(): void {
+    if (
+      this.maxReconnectAttempts !== null &&
+      this.reconnectAttempts >= this.maxReconnectAttempts
+    ) {
+      this.logger.error(
+        this.context,
+        'Max reconnect attempts reached. Stopping reconnect loop.',
+        undefined,
+        { maxReconnectAttempts: this.maxReconnectAttempts }
+      );
+      this.emitUpstreamStatus('disconnected', 'max_retries_exceeded');
+      return;
+    }
+
     const delayMs = getBackoffDelayMs({ attempt: this.reconnectAttempts });
     this.reconnectAttempts += 1;
 
@@ -153,7 +173,11 @@ export class FinnhubService implements OnModuleInit, OnModuleDestroy {
     try {
       const ticks = parseTradeTicks(rawMessage, this.pairByFinnhubSymbol);
       for (const tick of ticks) {
-        this.tickSubject.next(tick);
+        try {
+          this.tickSubject.next(tick);
+        } catch (error) {
+          this.logger.error(this.context, 'Failed to emit parsed tick.', error, { tick });
+        }
       }
     } catch (error) {
       this.logger.error(this.context, 'Failed to parse Finnhub message.', error, { rawMessage });
@@ -195,6 +219,16 @@ export class FinnhubService implements OnModuleInit, OnModuleDestroy {
 
     clearInterval(this.mockTimer);
     this.mockTimer = null;
+  }
+
+  private cleanupSocket(): void {
+    if (!this.socket) {
+      return;
+    }
+
+    this.socket.removeAllListeners();
+    this.socket.close();
+    this.socket = null;
   }
 
   private emitUpstreamStatus(status: UpstreamStatusEvent['status'], reason?: string): void {

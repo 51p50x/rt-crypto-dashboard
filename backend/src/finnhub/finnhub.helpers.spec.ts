@@ -1,4 +1,9 @@
-import { buildPairByFinnhubSymbolMap, parseTradeTicks } from './finnhub.helpers';
+import {
+  buildPairByFinnhubSymbolMap,
+  isEnvFlagEnabled,
+  parseTradeTicks,
+  resolveMaxReconnectAttempts
+} from './finnhub.helpers';
 
 describe('finnhub helpers', () => {
   it('builds map from finnhub symbol to pair', () => {
@@ -28,5 +33,23 @@ describe('finnhub helpers', () => {
         timestamp: 1710000000000
       }
     ]);
+  });
+
+  it('parses flexible env boolean flags', () => {
+    expect(isEnvFlagEnabled('true')).toBe(true);
+    expect(isEnvFlagEnabled('TRUE')).toBe(true);
+    expect(isEnvFlagEnabled('1')).toBe(true);
+    expect(isEnvFlagEnabled('yes')).toBe(true);
+    expect(isEnvFlagEnabled('on')).toBe(true);
+    expect(isEnvFlagEnabled('false')).toBe(false);
+    expect(isEnvFlagEnabled(undefined)).toBe(false);
+  });
+
+  it('resolves max reconnect attempts with safe fallback', () => {
+    expect(resolveMaxReconnectAttempts('-1')).toBeNull();
+    expect(resolveMaxReconnectAttempts(undefined)).toBeNull();
+    expect(resolveMaxReconnectAttempts('foo')).toBeNull();
+    expect(resolveMaxReconnectAttempts('0')).toBe(0);
+    expect(resolveMaxReconnectAttempts('5.9')).toBe(5);
   });
 });
