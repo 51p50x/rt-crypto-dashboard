@@ -84,3 +84,5 @@ npm test
   - `MOCK_STREAM_ENABLED=true`
 - Logging and throughput are tunable via environment variables.
 - SQLite runtime files are git-ignored to avoid committing local state.
+- Automated testing in this submission prioritizes unit tests for core real-time logic and state transformations.
+- Full end-to-end tests were intentionally left out of scope for the take-home timebox.
